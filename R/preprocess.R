@@ -1,0 +1,348 @@
+##' Autoscale values
+#'
+#' @description
+#' Autoscale (mean center and standardize) values in columns of data matrix.
+#'
+#' @param data
+#' a matrix with data values
+#' @param center
+#' a logical value or vector with numbers for centering
+#' @param scale
+#' a logical value or vector with numbers for weighting
+#' @param max.cov
+#' columns that have coefficient of variation (in percent) below or equal to `max.cov` will not
+#' be scaled
+#'
+#' @return
+#' data matrix with processed values
+#'
+#' @description
+#'
+#' The use of `max.cov` allows to avoid overestimation of inert variables, which vary
+#' very little. Note, that the `max.cov` value is already in percent, e.g. if `max.cov = 0.1` it
+#' will compare the coefficient of variation of every variable with 0.1% (not 1%). If you do not
+#' want to use this option simply keep `max.cov = 0`.
+#'
+#' @export
+prep.autoscale <- function(data, center = TRUE, scale = FALSE, max.cov = 0) {
+
+  f <- function(data, center, scale, max.cov) {
+    # define values for centering
+    if (is.logical(center) && center) center <- apply(data, 2, mean)
+
+    if (is.numeric(center) && length(center) != ncol(data)) {
+      stop("Number of values in 'center' should be the same as number of columns in 'daata'")
+    }
+
+    # define values for weigting
+    if (is.logical(scale) && scale) scale <- apply(data, 2, sd)
+
+    if (is.numeric(scale) && length(scale) != ncol(data)) {
+      stop("Number of values in 'scale' should be the same as number of columns in 'daata'")
+    }
+
+    # compute coefficient of variation and set scale to 1 if it is below
+    # a user defined threshold
+    if (is.numeric(scale)) {
+      m <- if (is.numeric(center)) center else apply(data, 2, mean)
+      cv <- scale / abs(m) * 100
+      scale[is.nan(cv) | cv <= max.cov] <- 1
+    }
+
+    # make autoscaling and attach preprocessing attributes
+    data <- scale(data, center = center, scale = scale)
+    attr(data, "scaled:center") <- NULL
+    attr(data, "scaled:scale") <- NULL
+    attr(data, "prep:center") <- center
+    attr(data, "prep:scale") <- scale
+
+    return(data)
+  }
+
+  return(prep.generic(data, f, center = center, scale = scale, max.cov = max.cov))
+}
+#
+#
+#' Standard Normal Variate transformation
+#'
+#' @description
+#' Applies Standard Normal Variate (SNV) transformation to the rows of data matrix
+#'
+#' @param data
+#' a matrix with data values
+#'
+#' @return
+#' data matrix with processed values
+#'
+#' @details
+#' SNV is a simple preprocessing to remove scatter effects (baseline offset and slope) from
+#' spectral data, e.g. NIR spectra.
+#'
+#'  @examples
+#'
+#'  ### Apply SNV to spectra from simdata
+#'
+#'  library(mdatools)
+#'  data(simdata)
+#'
+#'  spectra = simdata$spectra.c
+#'  wavelength = simdata$wavelength
+#'
+#'  cspectra = prep.snv(spectra)
+#'
+#'  par(mfrow = c(2, 1))
+#'  mdaplot(cbind(wavelength, t(spectra)), type = 'l', main = 'Before SNV')
+#'  mdaplot(cbind(wavelength, t(cspectra)), type = 'l', main = 'After SNV')
+#'
+#' @export
+prep.snv <- function(data) {
+
+  f <- function(data) t(scale(t(data), center = TRUE, scale = TRUE))
+  return(prep.generic(data, f))
+}
+
+#' Normalization
+#'
+#' @description
+#' Normalizes signals (rows of data matrix).
+#'
+#' @param data
+#' a matrix with data values
+#' @param type
+#' type of normalization \code{"area"}, \code{"length"}, \code{"sum"}, \code{"snv"}, or \code{"is"}.
+#' @param col.ind
+#' indices of columns (can be either integer or logical valuws) for normalization to internal
+#' standard peak.
+#'
+#' @details
+#' The \code{"area"}, \code{"length"}, \code{"sum"} types do preprocessing to unit area (sum of
+#' absolute values), length or sum of all values in every row of data matrix. Type \code{"snv"}
+#' does the Standard Normal Variate normalization, similar to \code{\link{prep.snv}}. Type
+#' \code{"is"} does the normalization to internal standard peak, whose position is defined by
+#' parameter `col.ind`. If the position is a single value, the rows are normalized to the height
+#' of this peak. If `col.ind` points on several adjucent vales, the rows are normalized to the area
+#' under the peak - sum of the intensities.
+#'
+#' @return
+#' data matrix with normalized values
+#'
+#' @export
+prep.norm <- function(data, type = "area", col.ind = NULL) {
+
+  if (type == "snv") return(prep.snv(data))
+
+  if (type == "is" && is.null(col.ind) ) {
+    stop("For 'is' normalization you need to provide indices for IS peak.")
+  }
+
+  if (is.logical(col.ind)) {
+    col.ind <- which(col.ind)
+  }
+
+  if (!is.null(col.ind) && (min(col.ind) < 1 || max(col.ind) > ncol(data))) {
+    stop("Values for 'col.ind' seem to be wrong.")
+  }
+
+  f <- function(data, type, col.ind) {
+
+    w <- switch(
+      type,
+      "area" = apply(abs(data), 1, sum),
+      "length" = sqrt(apply(data^2, 1, sum)),
+      "sum" = apply(data, 1, sum),
+      "is" = apply(data[, col.ind, drop = FALSE], 1, sum)
+    )
+
+    if (is.null(w)) stop("Wrong value for argument 'type'.")
+    return(sweep(data, 1, w, "/"))
+  }
+
+  return(prep.generic(data, f, type = type, col.ind = col.ind))
+}
+
+#' Savytzky-Golay filter
+#'
+#' @description
+#' Applies Savytzky-Golay filter to the rows of data matrix
+#'
+#' @param data
+#' a matrix with data values
+#' @param width
+#' width of the filter window
+#' @param porder
+#' order of polynomial used for smoothing
+#' @param dorder
+#' order of derivative to take (0 - no derivative)
+#'
+#' @details
+#' The function implements algorithm described in [1] which handles the edge points correctly and
+#' does not require to cut the spectra.
+#'
+#' @references
+#' 1. Peter A. Gorry. General least-squares smoothing and differentiation by the convolution
+#' (Savitzky-Golay) method. Anal. Chem. 1990, 62, 6, 570–573, https://doi.org/10.1021/ac00205a007.
+#'
+#' @export
+prep.savgol <- function(data, width = 3, porder = 1, dorder = 0) {
+
+  stopifnot("Filter width ('width') should be equal at least to 3." = width > 2)
+  stopifnot("Filter width ('width') should be an odd integer number." = width %% 2 == 1)
+  stopifnot("Wrong value for the derivative order (should be 0, 1, or 2)." = dorder %in% (0:2))
+  stopifnot("Wrong value for the polynomial degree (should be integer number between 0 and 4)." = porder %in% (0:4))
+  stopifnot("Polynomal degree ('porder') should not be smaller the derivative order ('dorder')." = porder >= dorder)
+
+  # compute grams polynomials
+  gram <- function(i, m, k, s) {
+    if (k > 0) {
+      return( (4 * k - 2) / (k * (2 * m - k + 1)) * (i * gram(i, m, k - 1, s) + s * gram(i, m, k - 1, s - 1)) -
+          ((k - 1) * (2 * m + k)) / (k * (2 * m - k + 1)) * gram(i, m, k - 2, s) )
+    }
+    if (k == 0 && s == 0) return(1)
+    return(0)
+  }
+
+  # compute generalized factorial
+  genfact <- function(a, b) {
+    f <- 1;
+    if ((a - b + 1) > a) return(f)
+
+    for (i in (a - b + 1):a) {
+      f <- f * i;
+    }
+
+    return(f)
+  }
+
+  # compute weights for convolution depending on position
+  weight <- function(i, t, m, n, s) {
+    sum <- 0
+    for (k in 0:n) {
+      sum <- sum + (2 * k + 1) * (genfact(2 * m, k) / genfact(2 * m + k + 1, k + 1)) * gram(i, m, k, 0) * gram(t, m, k, s)
+    }
+    return(sum)
+  }
+
+  f <- function(data, width, porder, dorder) {
+
+    nobj <- nrow(data)
+    nvar <- ncol(data)
+    pdata <- matrix(0, ncol = nvar, nrow = nobj)
+
+    m <- (width - 1) / 2
+    w <- outer(-m:m, -m:m, function(x, y) weight(x, y, m, porder, dorder))
+    n <- ncol(data)
+
+    for (j in seq_len(nobj)) {
+      for (i in 1:m) {
+        pdata[j, i] <- convolve(data[j, 1:(2 * m + 1)], w[, i], type = "filter")
+        pdata[j, n - i + 1] <- convolve(data[j, (n - 2 * m):n], w[, width - i + 1], type = "filter")
+      }
+
+      for (i in (m+1):(n-m)) {
+        pdata[j, i] <- convolve(data[j, (i - m):(i + m)], w[, m + 1], type = "filter")
+      }
+    }
+
+    return(pdata)
+  }
+
+  return(prep.generic(data, f, width = width, porder = porder, dorder = dorder))
+}
+
+#' Multiplicative Scatter Correction transformation
+#'
+#' @description
+#' Applies Multiplicative Scatter Correction (MSC) transformation to data matrix (spectra)
+#'
+#' @param data
+#' a matrix with data values (spectra)
+#' @param mspectrum
+#' mean spectrum (if NULL will be calculated from \code{spectra})
+#'
+#' @return
+#' preprocessed spectra (calculated mean spectrum is assigned as attribut 'mspectrum')
+#'
+#' @details
+#' MSC is used to remove scatter effects (baseline offset and slope) from
+#' spectral data, e.g. NIR spectra.
+#'
+#'  @examples
+#'
+#'  ### Apply MSC to spectra from simdata
+#'
+#'  library(mdatools)
+#'  data(simdata)
+#'
+#'  spectra = simdata$spectra.c
+#'  cspectra = prep.msc(spectra)
+#'
+#'  par(mfrow = c(2, 1))
+#'  mdaplot(spectra, type = "l", main = "Before MSC")
+#'  mdaplot(cspectra, type = "l", main = "After MSC")
+#'
+#' @export
+prep.msc <- function(data, mspectrum = NULL) {
+
+  f <- function(spectra, mspectrum) {
+    if (is.null(mspectrum)) {
+      mspectrum <- apply(spectra, 2, mean)
+    }
+
+    if (!is.null(mspectrum)) {
+      dim(mspectrum) <- NULL
+    }
+
+    if (length(mspectrum) != ncol(spectra)) {
+      stop("Length of 'mspectrum' should be the same as number of columns in 'spectra'.")
+    }
+
+    pspectra <- matrix(0, nrow = nrow(spectra), ncol = ncol(spectra))
+    for (i in seq_len(nrow(spectra))) {
+      coef <- coef(lm(spectra[i, ] ~ mspectrum))
+      pspectra[i, ] <- (spectra[i, ] - coef[1]) / coef[2]
+    }
+
+    attr(pspectra, "mspectrum") <- mspectrum
+    return(pspectra)
+  }
+
+  return(prep.generic(data, f, mspectrum = mspectrum))
+}
+
+
+#' Kubelka-Munk transformation
+#'
+#' @description
+#' Applies Kubelka-Munk (km) transformation to data matrix (spectra)
+#'
+#' @param data
+#' a matrix with spectra values (absolute reflectance values)
+#'
+#' @return
+#' preprocessed spectra.
+#'
+#' @details
+#' Kubelka-Munk is useful preprocessing method for diffuse reflection spectra (e.g. taken for
+#' powders or rough surface). It transforms the reflectance spectra R to K/M units as follows:
+#' (1 - R)^2 / 2R
+#'
+#' @export
+prep.ref2km <- function(data) {
+  stopifnot("Can't use Kubelka-Munk transformation as some of the values are zeros or negative." = all(data > 0))
+  f <- function(x) (1 - x)^2 / (2 * x)
+
+  return(prep.generic(data, f))
+}
+
+
+prep.generic <- function(x, f, ...) {
+  dimnames <- dimnames(x)
+  x.p <- f(x, ...)
+  dimnames(x.p) <- dimnames
+  return(x.p)
+}
+
+
+#' Shows a list with implemented preprocessing methods
+#'
+#' @export
